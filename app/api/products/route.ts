@@ -3,7 +3,6 @@ import { prisma } from "@/lib/prisma";
 import { releaseExpiredReservations } from "@/lib/reservations";
 
 export async function GET() {
-  // Lazy-release expired reservations first
   await releaseExpiredReservations();
 
   const products = await prisma.product.findMany({
@@ -21,16 +20,16 @@ export async function GET() {
     orderBy: { name: "asc" },
   });
 
-  const enriched = products.map((product) => ({
-    id: product.id,
-    name: product.name,
-    description: product.description,
-    imageUrl: product.imageUrl,
-    price: product.price,
-    sku: product.sku,
-    warehouses: product.inventories.map((inv) => {
-      const reserved = inv.reservations.reduce(
-        (s: number, r: { quantity: number }) => s + r.quantity,
+  const data = products.map((p) => ({
+    id: p.id,
+    name: p.name,
+    description: p.description,
+    imageUrl: p.imageUrl,
+    price: p.price,
+    sku: p.sku,
+    warehouses: p.inventories.map((inv) => {
+      const held = inv.reservations.reduce(
+        (sum: number, r: { quantity: number }) => sum + r.quantity,
         0
       );
       return {
@@ -39,11 +38,11 @@ export async function GET() {
         warehouseName: inv.warehouse.name,
         warehouseLocation: inv.warehouse.location,
         totalUnits: inv.totalUnits,
-        reservedUnits: reserved,
-        availableUnits: inv.totalUnits - reserved,
+        reservedUnits: held,
+        availableUnits: inv.totalUnits - held,
       };
     }),
   }));
 
-  return NextResponse.json(enriched);
+  return NextResponse.json(data);
 }

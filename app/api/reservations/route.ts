@@ -5,11 +5,10 @@ import { checkIdempotency, storeIdempotency } from "@/lib/idempotency";
 
 export async function POST(req: NextRequest) {
   try {
-    const idempotencyKey = req.headers.get("Idempotency-Key");
+    const ikey = req.headers.get("Idempotency-Key");
 
-    // Idempotency check
-    if (idempotencyKey) {
-      const cached = await checkIdempotency(idempotencyKey);
+    if (ikey) {
+      const cached = await checkIdempotency(ikey);
       if (cached.cached) {
         return NextResponse.json(cached.body, {
           status: cached.statusCode,
@@ -22,37 +21,26 @@ export async function POST(req: NextRequest) {
     const parsed = ReserveSchema.safeParse(body);
 
     if (!parsed.success) {
-      const errBody = {
-        error: "Validation error",
-        details: parsed.error.flatten(),
-      };
-      if (idempotencyKey) await storeIdempotency(idempotencyKey, 400, errBody);
+      const errBody = { error: "Validation error", details: parsed.error.flatten() };
+      if (ikey) await storeIdempotency(ikey, 400, errBody);
       return NextResponse.json(errBody, { status: 400 });
     }
 
-    const { inventoryId, quantity } = parsed.data;
-    const result = await createReservation(inventoryId, quantity);
+    const result = await createReservation(parsed.data.inventoryId, parsed.data.quantity);
 
     if (!result.success) {
-      let status = 400;
-      let message = "Failed to create reservation";
-
-      if (result.error === "INSUFFICIENT_STOCK") {
-        status = 409;
-        message =
-          "Not enough stock available. Another customer may have reserved the last units.";
-      } else if (result.error === "INVENTORY_NOT_FOUND") {
-        status = 404;
-        message = "Inventory record not found";
-      }
-
+      const status = result.error === "INSUFFICIENT_STOCK" ? 409 : 404;
+      const message =
+        result.error === "INSUFFICIENT_STOCK"
+          ? "Not enough stock — another customer may have just grabbed those units."
+          : "Inventory record not found";
       const errBody = { error: message, code: result.error };
-      if (idempotencyKey) await storeIdempotency(idempotencyKey, status, errBody);
+      if (ikey) await storeIdempotency(ikey, status, errBody);
       return NextResponse.json(errBody, { status });
     }
 
     const resBody = { reservation: result.reservation };
-    if (idempotencyKey) await storeIdempotency(idempotencyKey, 201, resBody);
+    if (ikey) await storeIdempotency(ikey, 201, resBody);
     return NextResponse.json(resBody, { status: 201 });
   } catch (err) {
     console.error("[POST /api/reservations]", err);

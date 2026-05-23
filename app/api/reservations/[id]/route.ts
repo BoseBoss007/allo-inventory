@@ -5,24 +5,15 @@ export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  try {
-    const { id } = await params;
-    const reservation = await prisma.reservation.findUnique({
-      where: { id },
-      include: {
-        inventory: {
-          include: { product: true, warehouse: true },
-        },
-      },
-    });
+  const { id } = await params;
+  const reservation = await prisma.reservation.findUnique({
+    where: { id },
+    include: { inventory: { include: { product: true, warehouse: true } } },
+  });
 
-    if (!reservation) {
-      return NextResponse.json({ error: "Reservation not found" }, { status: 404 });
-    }
-
-    return NextResponse.json({ reservation });
-  } catch (err) {
-    console.error("[GET /api/reservations/:id]", err);
-    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+  if (!reservation) {
+    return NextResponse.json({ error: "Reservation not found" }, { status: 404 });
   }
+
+  return NextResponse.json({ reservation });
 }

@@ -1,15 +1,10 @@
-/**
- * Seed script — run with: npx ts-node --compiler-options '{"module":"CommonJS"}' prisma/seed.ts
- * or via: npx prisma db seed
- */
 import { PrismaClient } from "@prisma/client";
 
 const prisma = new PrismaClient();
 
 async function main() {
-  console.log("🌱 Seeding database...");
+  console.log("seeding...");
 
-  // Warehouses
   const [mumbai, delhi, bangalore] = await Promise.all([
     prisma.warehouse.upsert({
       where: { id: "wh-mumbai" },
@@ -28,9 +23,6 @@ async function main() {
     }),
   ]);
 
-  console.log("✅ Warehouses seeded");
-
-  // Products
   const products = [
     {
       id: "prod-001",
@@ -88,7 +80,6 @@ async function main() {
       update: {},
       create: {
         ...p,
-        price: p.price,
         inventories: {
           create: [
             { warehouse: { connect: { id: mumbai.id } }, totalUnits: Math.floor(Math.random() * 8) + 2 },
@@ -100,13 +91,9 @@ async function main() {
     });
   }
 
-  console.log("✅ Products & inventories seeded");
-  console.log("🎉 Seed complete!");
+  console.log("done.");
 }
 
 main()
-  .catch((e) => {
-    console.error(e);
-    process.exit(1);
-  })
+  .catch((e) => { console.error(e); process.exit(1); })
   .finally(() => prisma.$disconnect());

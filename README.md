@@ -1,189 +1,97 @@
-# Allo Inventory — Take-Home Exercise
+# allo-inventory
 
-A **Next.js** inventory reservation platform that solves the checkout race condition: units are held for 10 minutes when a customer proceeds to checkout, then released automatically if payment isn't completed.
+Inventory reservation system built for the Allo take-home. Solves the checkout race condition: hold stock for 10 minutes when a user starts checkout, release it automatically if they don't pay.
 
-**Live demo:** _[Deploy to Vercel to get the URL]_
+Live demo: _[add after deploy]_
 
 ---
 
-## How to run locally
+## Running locally
 
-### 1. Prerequisites
-
-- Node.js ≥ 18
-- A [Neon](https://neon.tech) (or Supabase) Postgres instance
-- An [Upstash](https://upstash.com) Redis instance
-
-### 2. Clone & install
+You'll need a Postgres instance (I used Neon free tier) and a Redis instance (Upstash free tier).
 
 ```bash
-git clone <repo-url>
-cd allo-inventory
 npm install
+cp .env.example .env   # fill in the five values
+npx prisma migrate dev --name init
+npx prisma generate
+npm run db:seed
+npm run dev
 ```
 
-### 3. Environment variables
+`.env` variables:
 
-Copy the example and fill in your credentials:
-
-```bash
-cp .env.example .env
-```
-
-| Variable | Where to get it |
+| Key | Where to get it |
 |---|---|
-| `DATABASE_URL` | Neon → Connection → Pooled connection string |
-| `DIRECT_URL` | Neon → Connection → Direct connection string |
+| `DATABASE_URL` | Neon → pooled connection string |
+| `DIRECT_URL` | Neon → direct connection string (for migrations) |
 | `UPSTASH_REDIS_REST_URL` | Upstash → Redis → REST URL |
 | `UPSTASH_REDIS_REST_TOKEN` | Upstash → Redis → REST Token |
-| `CRON_SECRET` | Any random string, e.g. `openssl rand -hex 32` |
-
-### 4. Migrate & seed
-
-```bash
-# Apply schema
-npx prisma migrate dev --name init
-
-# Generate Prisma client
-npx prisma generate
-
-# Seed with sample products, warehouses, and inventory
-npm run db:seed
-```
-
-### 5. Start dev server
-
-```bash
-npm run dev
-# → http://localhost:3000
-```
+| `CRON_SECRET` | any string, e.g. `openssl rand -hex 32` |
 
 ---
 
-## API Reference
+## API
 
-| Method | Path | Behaviour |
+| Method | Path | Notes |
 |---|---|---|
-| `GET` | `/api/products` | List products with available stock per warehouse |
-| `GET` | `/api/warehouses` | List all warehouses |
-| `POST` | `/api/reservations` | Reserve units. Returns `409` if insufficient stock |
-| `GET` | `/api/reservations/:id` | Get a single reservation |
-| `POST` | `/api/reservations/:id/confirm` | Confirm purchase. Returns `410` if expired |
-| `POST` | `/api/reservations/:id/release` | Release early (cancel / payment failure) |
-| `GET` | `/api/cron/expire-reservations` | Batch-release expired reservations (cron only) |
+| GET | `/api/products` | products + live available stock per warehouse |
+| GET | `/api/warehouses` | warehouse list |
+| POST | `/api/reservations` | create reservation; 409 if stock is gone |
+| GET | `/api/reservations/:id` | fetch a reservation |
+| POST | `/api/reservations/:id/confirm` | confirm (simulate payment success); 410 if expired |
+| POST | `/api/reservations/:id/release` | release early (cancel / payment failure) |
+| GET | `/api/cron/expire-reservations` | batch-release expired reservations |
 
-All mutating endpoints support the **`Idempotency-Key`** header (see below).
+All POST endpoints support `Idempotency-Key` header.
 
 ---
 
-## Concurrency strategy — how race conditions are prevented
+## How the race condition is prevented
 
-The core challenge: if two requests arrive simultaneously for the last unit of a SKU, exactly one must succeed.
-
-**Solution: `SELECT FOR UPDATE` in a Postgres transaction.**
+Two concurrent requests for the last unit of a SKU — one wins, one gets 409. This is done with `SELECT FOR UPDATE` inside a Postgres transaction:
 
 ```sql
 BEGIN;
-  -- 1. Lazy-release any already-expired reservations for this row
+  -- release any stale holds first
   UPDATE reservations SET status='RELEASED' WHERE inventoryId=$1 AND status='PENDING' AND expiresAt < now();
 
-  -- 2. Acquire an exclusive row lock on the inventory record
+  -- exclusive row lock — second request blocks here until we commit
   SELECT id, "totalUnits" FROM inventories WHERE id = $1 FOR UPDATE;
 
-  -- 3. Count currently-active reservations
-  SELECT SUM(quantity) FROM reservations WHERE inventoryId=$1 AND status='PENDING';
+  -- count active holds
+  SELECT COALESCE(SUM(quantity), 0) FROM reservations WHERE inventoryId=$1 AND status='PENDING';
 
-  -- 4a. If available >= requested quantity: INSERT reservation
-  -- 4b. Otherwise: raise error -> caller returns HTTP 409
+  -- insert if available >= requested, otherwise throw
 COMMIT;
 ```
 
-`FOR UPDATE` holds an exclusive row lock until the transaction commits. A concurrent transaction trying to lock the same row **blocks** until the first commits. When it unblocks, it sees the freshly-inserted reservation in step 3 and correctly rejects if stock is now depleted.
-
-This is simpler and more correct than Redis-based locking for this use case because:
-- The lock scope matches the data scope (one inventory row = one lock).
-- There's no possibility of a Redis lock expiring mid-transaction.
-- No split-brain between lock store and database.
-
-> **Trade-off:** Under extreme concurrency (thousands of req/s for the same SKU), row-level locking creates queuing. For that scale, a Redis atomic counter (`DECRBY` with a floor check) could be used as a fast pre-check before the DB transaction, turning most losing requests away before they touch Postgres.
+The row lock means the second request sees the freshly inserted reservation when it unblocks, so the stock check is always accurate. Redis-based locking would work too but adds a split-brain risk between the lock store and the DB — using the DB itself as the lock is simpler and harder to mess up.
 
 ---
 
-## Reservation expiry mechanism
+## Expiry
 
-Expired reservations are cleaned up via **two complementary strategies**:
+Two layers:
 
-### 1. Lazy cleanup on read (always active)
+1. **Lazy** — every `GET /api/products` and `POST /api/reservations` sweeps `WHERE status='PENDING' AND expiresAt < now()` and flips them to RELEASED. Stock counts are always fresh at query time.
 
-Every call to `GET /api/products` or `POST /api/reservations` first runs:
-
-```sql
-UPDATE reservations
-SET status='RELEASED', releasedAt=now()
-WHERE status='PENDING' AND expiresAt < now();
-```
-
-This ensures available stock counts are always accurate at the moment of a read.
-
-### 2. Vercel Cron (production)
-
-`vercel.json` schedules `GET /api/cron/expire-reservations` every **5 minutes**. The endpoint requires a `CRON_SECRET` bearer token.
-
-This matters when traffic is low — lazy cleanup only fires when someone makes a request, so without the cron, a 2am reservation on a quiet store might stay `PENDING` until the next shopper loads the page.
-
-> **Why not a long-running background worker?** Vercel's serverless runtime doesn't support persistent processes. A dedicated worker (e.g., BullMQ on Railway) would be more precise but adds infrastructure complexity. Cron + lazy cleanup covers all correctness requirements for this exercise.
+2. **Cron** — `vercel.json` runs `/api/cron/expire-reservations` every 5 minutes. This matters at night when there's no traffic and lazy cleanup wouldn't fire.
 
 ---
 
-## Idempotency (bonus)
+## Idempotency
 
-All mutating endpoints honour the `Idempotency-Key` request header.
+Pass an `Idempotency-Key: <uuid>` header on any POST. First call executes and stores `(key, status, body)` in the `idempotency_records` table with a 24h TTL. Retries get the stored response back with `X-Idempotent-Replay: true`.
 
-**Implementation:**
-
-1. **First request** with key `K`: execute the action, store `(K, statusCode, responseBody, expiresAt=now+24h)` in the `idempotency_records` Postgres table.
-2. **Retry** with the same key `K`: skip the action entirely, return the stored response with header `X-Idempotent-Replay: true`.
-3. Records expire after 24 hours (cleaned lazily on read).
-
-The frontend generates a fresh UUID v4 for each new action and reuses it on network-level retries.
-
-> **Alternative:** Redis `SETEX` would be faster and self-cleaning. Postgres was chosen here to keep infrastructure minimal.
+I used Postgres for this rather than Redis to avoid adding another moving part. Redis `SETEX` would be a cleaner choice in production.
 
 ---
 
-## Data model
+## Trade-offs / things I'd do differently
 
-```
-Warehouse     1 ──< Inventory >── 1     Product
-                         |
-                         └──< Reservation
-```
-
-- **Inventory** links a product to a warehouse and holds `totalUnits`.
-- `availableUnits` is computed at query time: `totalUnits - SUM(quantity WHERE status='PENDING')`.
-- `totalUnits` is permanently decremented only on `CONFIRMED`, so expired/cancelled reservations need no stock-counter rollback.
-
----
-
-## Trade-offs and what I'd do differently
-
-| Area | What I did | With more time |
-|---|---|---|
-| **Expiry precision** | Cron every 5 min + lazy cleanup | BullMQ delayed job per reservation for exact-to-the-second release |
-| **Idempotency store** | Postgres table | Redis SETEX — faster and auto-evicts |
-| **Stock counter** | Decrement totalUnits on confirm | Separate confirmedUnits column for easier refund/reversal |
-| **Auth** | None | NextAuth.js session tied to reservations |
-| **Tests** | Not included | Integration tests for the race-condition path with concurrent requests |
-| **Observability** | console.log | Structured logging + Sentry |
-
----
-
-## Stack
-
-- **Next.js 15** (App Router) + TypeScript
-- **Prisma 7** + **Neon** (hosted Postgres)
-- **Upstash Redis** (distributed lock support)
-- **Zod** — shared request validation
-- **shadcn/ui** + **Tailwind CSS v4**
-- **Sonner** — toast notifications
-- **Vercel** — hosting + cron
+- **Expiry precision** — the cron fires every 5 min so a reservation that expires at 2:01 might not be visibly released until 2:05. A BullMQ delayed job per reservation would be exact. Not worth the infra complexity here.
+- **Stock counter** — I decrement `totalUnits` on confirm. A separate `confirmedUnits` column would make refunds/reversals easier without having to recalculate from reservation history.
+- **Auth** — there's none. In a real system you'd tie reservations to user sessions so you can't reserve on someone else's behalf.
+- **Tests** — I didn't write any. The race condition logic is the thing that most needs a test: spin up two concurrent requests for the same last unit and assert exactly one 201 + one 409. Would add that next.
+- **Error granularity** — right now a 500 is just a 500. Structured error codes + Sentry would help in production.
