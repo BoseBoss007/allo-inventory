@@ -2,7 +2,7 @@
 
 Inventory reservation system built for the Allo take-home. Solves the checkout race condition: hold stock for 10 minutes when a user starts checkout, release it automatically if they don't pay.
 
-Live demo: _[add after deploy]_
+Live demo: https://allo-inventory-20k66l3tk-ramit-bose-s-projects.vercel.app
 
 ---
 
