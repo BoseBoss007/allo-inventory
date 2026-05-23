@@ -1,0 +1,93 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model Warehouse {
+  id        String   @id @default(cuid())
+  name      String
+  location  String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  inventories Inventory[]
+
+  @@map("warehouses")
+}
+
+model Product {
+  id          String   @id @default(cuid())
+  name        String
+  description String
+  imageUrl    String?
+  price       Decimal  @db.Decimal(10, 2)
+  sku         String   @unique
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  inventories Inventory[]
+
+  @@map("products")
+}
+
+model Inventory {
+  id          String   @id @default(cuid())
+  productId   String
+  warehouseId String
+  totalUnits  Int
+  // reservedUnits = sum of active (pending) reservations — computed via reservations
+  // available = totalUnits - reservedUnits
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  product      Product      @relation(fields: [productId], references: [id])
+  warehouse    Warehouse    @relation(fields: [warehouseId], references: [id])
+  reservations Reservation[]
+
+  @@unique([productId, warehouseId])
+  @@map("inventories")
+}
+
+model Reservation {
+  id          String            @id @default(cuid())
+  inventoryId String
+  quantity    Int
+  status      ReservationStatus @default(PENDING)
+  expiresAt   DateTime
+  confirmedAt DateTime?
+  releasedAt  DateTime?
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  inventory Inventory @relation(fields: [inventoryId], references: [id])
+
+  @@index([inventoryId, status])
+  @@index([status, expiresAt])
+  @@map("reservations")
+}
+
+// For idempotency key store
+model IdempotencyRecord {
+  key        String   @id
+  statusCode Int
+  body       Json
+  createdAt  DateTime @default(now())
+  expiresAt  DateTime
+
+  @@index([expiresAt])
+  @@map("idempotency_records")
+}
+
+enum ReservationStatus {
+  PENDING
+  CONFIRMED
+  RELEASED
+}
